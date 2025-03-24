@@ -21,14 +21,15 @@ This script **decomposes (compresses) certain Linear layers in an LLM model (e.g
 - **Weights & Biases (wandb)** (optional, remove if you prefer)  
 - Other libraries: `numpy`, `pandas`, `tqdm`, `json`
 
-Installation example (adjust as needed):
+**Installation**:
 
 ```bash
 pip install torch torchvision torchaudio
 pip install transformers datasets
 pip install wandb
 pip install numpy pandas tqdm
-Additionally, the script uses local modules (e.g., preprocess.py, dataset_ppl.py, layers.py, lm_eval), ensure these exist in the same directory or your Python path.
+
+Additionally, the script uses local modules (e.g., preprocess.py, dataset_ppl.py, layers.py, lm_eval), so ensure these exist in the same directory or your Python path.
 
 Usage
 How to Run
@@ -45,6 +46,7 @@ python sfds_main.py \
   --weights_name "my_decomposed_model" \
   --batch_size 256 \
   --seq_len 128
+
 Replace your_script_name.py with your actual script name (e.g., sfds_main.py).
 
 Use --help or -h to see available arguments.
@@ -94,13 +96,3 @@ project/
 │       └── huggingface.py      # HFLM wrapper
 ├── logs/                       # logs/checkpoints (optional)
 └── README.md                   # this file
-Notes
-GPU Memory: Requires significant GPU memory for larger models.
-
-Dataset Download: Needs internet for Hugging Face datasets on first run.
-
-WandB: Requires a WandB account. Remove related code if unused.
-
-License: Check model-specific licenses (e.g., Llama 2 by Meta).
-
-Adjust details as necessary for your environment.
