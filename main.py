@@ -149,7 +149,7 @@ def load_base_model(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=torch.float32,
-        device_map="cpu",
+        device_map="auto",
         trust_remote_code=True,
         cache_dir=args.cache_dir,
     )
@@ -318,14 +318,14 @@ def save_decomposed_model(model, args):
 ########################################
 def prepare_evaluation_models(base_model, args, layer_names):
     eval_base_model = base_model
-    eval_base_model.to("cuda")
+    #eval_base_model.to("cuda")
     decomposable_layers_eval, max_ranks_eval = get_decomposable_layers(eval_base_model, layer_names)
     
     new_model = AutoModelForCausalLM.from_pretrained(
         args.model,
         trust_remote_code=True,
-        device_map="cuda",
-        cache_dir="../SpeculativeDecoding/cache_dir",
+        device_map="auto",
+        cache_dir=args.cache_dir,
         torch_dtype=torch.float16
     )
     decomposable_layers_new, _ = get_decomposable_layers(new_model, layer_names)
@@ -413,7 +413,7 @@ def prune_layers(eval_base_model, new_model, baseline_accs, max_ranks_eval,
         split_rank = []
         # parser로 전달된 max_ratio를 사용하여 검색 공간 조절
         # 예: 0.1 ~ 0.5라면 [1, (0.1*max_rank), (0.2*max_rank) ...]
-        search_space = [1] + list((np.arange(0.5, args.max_ratio + 0.1, 0.1) * max_ranks_eval[index]).astype(np.int32))
+        search_space = [1] + list((np.arange(0.1, args.max_ratio + 0.1, 0.1) * max_ranks_eval[index]).astype(np.int32))
         print(f"[Debug] Layer {index} search_space: {search_space}")
 
         for i in range(3):
@@ -548,7 +548,7 @@ def main():
     log_message(str(args), args.log_path)
     print(f"[INFO] Using model: {args.model}")
 
-    if not os.path.exists(args.weights_name + ".pt"):
+    if not os.path.exists(args.weights_name):
         print(f"[INFO] Decomposed model file {args.weights_name} not found. Running forward test and saving model.")
         base_model = load_base_model(args)
         layer_names = [name.strip() for name in args.layers.split(',')]
@@ -563,7 +563,15 @@ def main():
         save_decomposed_model(base_model, args)
     else:
         print(f"[INFO] Found decomposed model file {args.weights_name}. Loading model directly.")
-        base_model = torch.load(args.weights_name + ".pt")
+        #base_model = torch.load(args.weights_name + ".pt")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            args.weights_name,
+            torch_dtype=torch.float32,
+            device_map="auto",
+            trust_remote_code=True,
+            cache_dir=args.cache_dir,
+        )
+        input()
         layer_names = [name.strip() for name in args.layers.split(',')]
 
     eval_base_model, new_model, decomposable_layers_eval, max_ranks_eval, decomposable_layers_new = \
