@@ -23,16 +23,15 @@ This script **decomposes (compresses) certain Linear layers in an LLM model (e.g
 
 **Installation**:
 
-```bash
 pip install torch torchvision torchaudio
 pip install transformers datasets
 pip install wandb
 pip install numpy pandas tqdm
 
 Additionally, the script uses local modules (e.g., preprocess.py, dataset_ppl.py, layers.py, lm_eval), so ensure these exist in the same directory or your Python path.
-
-Usage
-How to Run
+---
+## Usage
+# How to Run
 python your_script_name.py [OPTIONS]
 
 # Example:
@@ -47,11 +46,11 @@ python sfds_main.py \
   --batch_size 256 \
   --seq_len 128
 
-Replace your_script_name.py with your actual script name (e.g., sfds_main.py).
+* Replace your_script_name.py with your actual script name (e.g., sfds_main.py).
 
-Use --help or -h to see available arguments.
+* Use --help or -h to see available arguments.
 
-Key Arguments
+## Key Arguments
 Argument	Type	Default	Description
 --layers	str	"o_proj,q_proj,v_proj,k_proj,gate_proj,up_proj,down_proj"	Comma-separated keywords for layers (e.g., o_proj,q_proj).
 --dataset	str	"piqa"	Dataset name
@@ -66,24 +65,28 @@ Argument	Type	Default	Description
 --start_layer	int	28	Start layer index
 --base_model	str	"decomposed_model_mistral_combination.pt"	Base model file
 --max_ratio	float	1.0	Max compression ratio
-Workflow Summary
-Load Base Model: Load via Hugging Face API.
 
-Identify Decomposable Layers: Locate decomposable linear layers.
+--- 
+# Workflow Summary
+- Load Base Model: Load via Hugging Face API.
 
-Inject Modules: Inject custom decomposable modules.
+- Identify Decomposable Layers: Locate decomposable linear layers.
 
-Forward Test: Verify correctness with dataset forward pass.
+- Inject Modules: Inject custom decomposable modules.
 
-Save Model: Store decomposed model.
+- Forward Test: Verify correctness with dataset forward pass.
 
-Baseline Evaluation: Measure initial metrics.
+- Save Model: Store decomposed model.
 
-Layer Compression: Rank search for optimal compression.
+- Baseline Evaluation: Measure initial metrics.
 
-Final Logging: Record results (WandB/local files).
+- Layer Compression: Rank search for optimal compression.
 
-Example Directory Structure
+- Final Logging: Record results (WandB/local files).
+
+- Example Directory Structure
+
+---
 
 project/
 ├── sfds_main.py                # main script with main()
