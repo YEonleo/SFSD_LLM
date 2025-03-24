@@ -28,13 +28,13 @@ pip install transformers datasets
 pip install wandb
 pip install numpy pandas tqdm
 
-Additionally, the script uses local modules (e.g., preprocess.py, dataset_ppl.py, layers.py, lm_eval), so ensure these exist in the same directory or your Python path.
+
 ---
-## Usage
-# How to Run
+# Usage
+## How to Run
 python your_script_name.py [OPTIONS]
 
-# Example:
+## Example:
 python sfds_main.py \
   --model meta-llama/Llama-2-7b-hf \
   --dataset piqa \
@@ -67,7 +67,7 @@ Argument	Type	Default	Description
 --max_ratio	float	1.0	Max compression ratio
 
 --- 
-# Workflow Summary
+## Workflow Summary
 - Load Base Model: Load via Hugging Face API.
 
 - Identify Decomposable Layers: Locate decomposable linear layers.
