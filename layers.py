@@ -90,26 +90,20 @@ class DecomposeLinearSVD(torch.nn.Linear):
 class DecomposeLinearEigen(torch.nn.Linear):
     def __init__(self, in_features, out_features, rank, weight, bias):
         super(DecomposeLinearEigen, self).__init__(
-            in_features=in_features, out_features=out_features, bias=True
+            in_features=in_features, out_features=out_features, bias = True
         )
         self.mf16 = False
         self.init = False
         self.weight = weight
         self.rank = rank
-
-        ## CHANGED: V, b1, Y_sub를 buffer로 등록하기 위해 미리 placeholder로 만들어 둠
-        # persistent=False 는 꼭 영구저장이 필요없으면 False로 하셔도 됩니다 (속성)
-        self.register_buffer("V_buf", torch.zeros(out_features, rank, dtype=weight.dtype), persistent=True)
-        self.register_buffer("b1_buf", torch.zeros(1, out_features, dtype=weight.dtype), persistent=True)
-        self.register_buffer("Y_sub_buf", torch.zeros(1, out_features, dtype=weight.dtype), persistent=False)
-
+        self.V = None
         self.weight1 = nn.Parameter(
             torch.zeros(
                 rank,
                 in_features,
                 requires_grad=True,
-                device=weight.device,
-                dtype=weight.dtype,
+                device=self.weight.device,
+                dtype=self.weight.dtype,
             )
         )
         self.weight2 = nn.Parameter(
@@ -117,70 +111,78 @@ class DecomposeLinearEigen(torch.nn.Linear):
                 out_features,
                 rank,
                 requires_grad=True,
-                device=weight.device,
-                dtype=weight.dtype,
+                device=self.weight.device,
+                dtype=self.weight.dtype,
             )
         )
-
     def make_float16(self):
-        # half로 전환
-        self.Y_sub_buf = self.Y_sub_buf.half()
-        self.V_buf = self.V_buf.half()
+        self.Y_sub = self.Y_sub.half()
+        self.V = self.V.half()
         self.weight.data = self.weight.data.to(torch.float16)
         self.weight2.data = self.weight2.data.to(torch.float16)
-        self.weight1.data = self.weight1.data.to(torch.float16)
+        self.weight1.data =  self.weight1.data.to(torch.float16)
         self.bias.data = self.bias.data.to(torch.float16)
-        self.b1_buf = self.b1_buf.to(torch.float16)
+        self.b1 = self.b1.to(torch.float16)
         self.mf16 = True
         gc.collect()
 
+
     def init_lowrank(self, input):
-        # 아직 self.V_buf이 텅 비어 있을 것이므로 여기서 실제 값 계산
-        if torch.count_nonzero(self.V_buf) == 0:
-            # 실제 연산
+        if self.V is None:
             Y = (
                 F.linear(input, self.weight, None)
                 .reshape(-1, self.out_features)
                 .float()
                 .cpu()
-            )  # (BS, out)
+            )  # BS, out 
             Y_mean = torch.mean(Y, dim=0).unsqueeze(0)
-            self.Y_sub_buf = (Y - Y_mean)  # buffer에 복사할 예정
-
-            cov = torch.cov(torch.transpose(self.Y_sub_buf, 1, 0))  # (out, out)
-            _, V = torch.linalg.eigh(cov.float())  # (out, out)
-            self.target_budget = self.rank / (
-                self.in_features
-                * self.out_features
-                / (self.in_features + self.out_features)
-            )
-            V = V[:, -self.rank:].to(self.weight.dtype)  # (out, rank)
-
-            # b1_buf
-            b1 = (Y_mean - Y_mean @ V @ V.transpose(1,0))
-            self.b1_buf = b1.to(self.weight.device).to(self.weight.dtype)
-
-            # CPU -> GPU 복사
-            self.register_buffer("V_buf", V.to(self.weight.device))
-            self.register_buffer("b1_buf", self.b1_buf.to(self.weight.device))
-            self.register_buffer("Y_sub_buf", self.Y_sub_buf.to(self.weight.device))
-
-        # 최종 weight1, weight2 초기화
-        self.weight2.data = self.V_buf
-        self.weight1.data = (
-            torch.transpose(self.V_buf, 1, 0).to(self.weight.device) @ self.weight
+            self.Y_sub = (Y - Y_mean)
+            cov = torch.cov(torch.transpose(self.Y_sub, 1, 0))  # out, out
+            _, self.V = torch.linalg.eigh(cov.float())  # out, out
+        self.target_budget = self.rank / (
+            self.in_features
+            * self.out_features
+            / (self.in_features + self.out_features)
         )
-
-        # bias도 수정
-        # 남는 공간 V_prune가 있다면 처리
-        V_prune = None
-        # 예: V_prune = V[:, :-self.rank] 이렇게 할 수도 있지만, 코드에 따라 변경
-        # 여기서는 self.rank만큼 썼으므로 남는 차원은 0. 실제로는 full covariance 시에만 가능
-        # 편의상, 여기서는 self.b1_buf를 그냥 bias에 더해줍니다.
-        self.bias.data = self.b1_buf.squeeze(0) + self.bias.data
-        # 필요 시, 추가적인 편차 적용
-
+        # self.get_importance(Y)
+        V = self.V[:, -self.rank:].to(self.weight.dtype)  # out, rank
+        self.b1 = (Y_mean - Y_mean @ self.V @ self.V.transpose(1,0)).to(self.weight.device).to(self.weight.dtype)
+        V_prune = self.V[:, :-self.rank].to(self.weight.device).to(self.weight.dtype) # out, rank
+        # print(self.bias.data.dtype,V_prune.dtype, Y_sub.dtype) 
+        self.Y_sub = self.Y_sub.mean(dim = 0, keepdim = True).to(self.weight.device)
+        self.bias.data = self.b1 + (V_prune @ V_prune.transpose(1,0) @ self.Y_sub.transpose(1,0)).transpose(1,0).to(self.weight.device)
+        # del V_prune
+        self.bias.data = self.bias.data.to(self.weight.device).to(self.weight.dtype)
+        self.weight2.data = V.to(self.weight.device)
+        self.weight1.data = (
+            torch.transpose(V, 1, 0).to(self.weight.device) @ self.weight
+        )
         self.init = True
+    # def init_lowrank(self, input):
+    #     if self.V is None:
+    #         Y = (
+    #             F.linear(input, self.weight, None)
+    #             .reshape(-1, self.out_features)
+    #             .float()
+    #             .cpu()
+    #         )  # BS, out
+    #         cov = torch.cov(torch.transpose(Y, 1, 0))  # out, out
+    #         _, V1 = torch.linalg.eigh(cov.float())  # out, out
+    #     self.target_budget = self.rank / (
+    #         self.in_features
+    #         * self.out_features
+    #         / (self.in_features + self.out_features)
+    #     )
+    #     V = V1[:, -self.rank:].to(self.weight.dtype)  # out, rank
+    #     self.weight2.data = V.to(self.weight.device)
+    #     self.weight1.data = (
+    #         torch.transpose(V, 1, 0).to(self.weight.device) @ self.weight
+    #     ).to(self.weight.device)
+    #     self.V = None
+    #     del Y,cov,V,V1
+    #     self.weight = None
+    #     # self.get_importance(input)
+    #     self.init = True
 
     def get_importance(self, input):
         input_norm = torch.norm(input.reshape(-1, input.shape[-1]), p=2, dim=0)[None, :]
@@ -191,11 +193,15 @@ class DecomposeLinearEigen(torch.nn.Linear):
         imp2 = input_norm * self.weight2.abs()
         imp2 = imp2.sum(1)
         self.scores = imp1.tolist()
+        # Y = XA @ self.weight2.transpose(1,0) # BS, out
+        # self.scores = []
+        # for i in range(self.rank):
+        #     self.scores.append((XA[:,i][:,None] * self.weight2[i,:][None,:]).abs().mean().item()) # BS, out
 
     def forward(self, input):
         if not self.init:
             self.init_lowrank(input)
-
+        # print(input.device, self.weight1.device,self.weight2.device)
         out = F.linear(
             F.linear(input, self.weight1, None),
             self.weight2,
@@ -214,10 +220,47 @@ class DecomposeLinearEigen(torch.nn.Linear):
             linear_module.weight,
             linear_module.bias,
         )
+        # new_linear.weight = None
         new_linear.weight1.requires_grad = True
         new_linear.weight2.requires_grad = True
         return new_linear
 
+class DecomposeLinearEigenEmpty(torch.nn.Linear):
+    """
+    분해 과정 없이 '빈' 상태로 DecomposeLinearEigen 구조만 만들어 놓은 버전.
+    rank만 맞춰놓고, weight1, weight2 등은 0 또는 임의 값으로 초기화됨.
+    이후 load_state_dict()로 CPU에서 분해된 실제 파라미터를 덮어씌울 수 있다.
+    """
+    def __init__(self, in_features, out_features, rank, device, dtype):
+        super().__init__(in_features, out_features, bias=True)
+        self.mf16 = False
+        self.init = True  # 실제 분해 계산 안 하므로 True로
+        self.rank = rank
+
+        # 필요 파라미터
+        self.weight1 = nn.Parameter(
+            torch.zeros(
+                rank, in_features, requires_grad=True, device=device, dtype=dtype
+            )
+        )
+        self.weight2 = nn.Parameter(
+            torch.zeros(
+                out_features, rank, requires_grad=True, device=device, dtype=dtype
+            )
+        )
+
+        # bias와 유사한 역할
+        self.b1 = None
+        self.Y_sub = None
+        self.V = None
+
+        # 그냥 super()에서 만들어진 self.bias는 살아있음
+        nn.init.zeros_(self.bias)
+
+    def forward(self, input):
+        # 여기서는 별도의 init_lowrank 없음
+        out = F.linear(F.linear(input, self.weight1, None), self.weight2, self.bias)
+        return out
 
 class DecomposeLinearSVDPrune(DecomposeLinearSVD):
     def __init__(self, in_features, out_features, rank, budget, weight, bias):
@@ -508,6 +551,21 @@ class ModuleInjection:
                 param.requires_grad = True
             new_linear = linear_module
         linear_module = None
+        return new_linear
+    
+    @staticmethod
+    def make_decomposable_empty(linear_module, rank, method="eigen"):
+        """
+        분해 계산 없이, 동일 구조의 모듈만 새로 만들어 반환
+        """
+        device = linear_module.weight.device
+        dtype = linear_module.weight.dtype
+        if method == "eigen":
+            new_linear = DecomposeLinearEigenEmpty(
+                linear_module.in_features, linear_module.out_features, rank, device, dtype
+            )
+        else:
+            raise NotImplementedError("현재 예시는 eigen만 예시로 작성")
         return new_linear
 
 
