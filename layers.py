@@ -14,55 +14,45 @@ class DecomposeLinearSVD(torch.nn.Linear):
         super(DecomposeLinearSVD, self).__init__(
             in_features=in_features, out_features=out_features
         )
-        self.U, self.S, self.Vh = torch.linalg.svd(weight, full_matrices=False)
-
-        # 추가: U/S/Vh를 buffer로 등록하고 싶다면 아래처럼 가능합니다.
-        # (필요 없다면, 원 코드처럼 None으로 만들면 됩니다.)
-        ## CHANGED: buffer 등록 예시
-        self.register_buffer("U_buf", self.U.clone().detach(), persistent=True)
-        self.register_buffer("S_buf", self.S.clone().detach(), persistent=True)
-        self.register_buffer("Vh_buf", self.Vh.clone().detach(), persistent=True)
-
+        self.U, self.S, self.Vh = torch.linalg.svd(self.weight, full_matrices=False)
         if not (isinstance(rank, float) or isinstance(rank, int)):
             variance = float(rank.split(":")[-1])
             S_sum = torch.cumsum(self.S.float(), 0)
             self.rank = torch.searchsorted(S_sum, S_sum[-1] * variance).item()
             self.target_budget = self.rank / (
-                in_features * out_features / (in_features + out_features)
+                self.in_features
+                * self.out_features
+                / (self.in_features + self.out_features)
             )
         else:
             self.rank = rank
-
         self.weight = weight
         self.weight1 = nn.Parameter(
-            torch.zeros(self.rank, in_features, requires_grad=True, device=weight.device, dtype=weight.dtype)
+            torch.zeros(self.rank, in_features, requires_grad=True, device="cuda")
         )
         self.weight2 = nn.Parameter(
-            torch.zeros(out_features, self.rank, requires_grad=True, device=weight.device, dtype=weight.dtype)
+            torch.zeros(out_features, self.rank, requires_grad=True, device="cuda")
         )
-
-        # 초기화
         self.weight1.data = torch.transpose(
             torch.transpose(self.Vh[: self.rank, :], 1, 0)
             @ torch.diag((self.S[: self.rank])),
             1,
             0,
-        ).to(weight.device).to(weight.dtype)
-
-        # 아래 두 줄은 bias 관련이지만 주석 처리되어 있음
+        ).cuda()
         w1_bias = torch.transpose(
-            torch.transpose(self.Vh[self.rank:, :], 1, 0)
+            torch.transpose(self.Vh[ self.rank : , :], 1, 0)
             @ torch.diag((self.S[self.rank:])),
             1,
             0,
-        ).mean(axis=0).reshape((1,self.weight1.data.shape[1]))
-
-        self.weight2.data = self.U[:, : self.rank].to(weight.device).to(weight.dtype)
-        w2_bias = self.U[:, self.rank:].mean(axis = 1).reshape((self.weight2.data.shape[0],1))
-        
+        ).mean(axis = 0).reshape((1,self.weight1.data.shape[1]))
+        # self.weight1.data = torch.cat((self.weight1.data,w1_bias),axis = 0).cuda()
+        self.weight2.data = self.U[:, : self.rank].cuda()
+        w2_bias = self.U[:,self.rank:].mean(axis = 1).reshape((self.weight2.data.shape[0],1))
+        # self.weight2.data = torch.cat((self.weight2.data,w2_bias),axis = 1).cuda()
         print(self.weight1.data.shape, self.weight2.data.shape)
 
     def forward(self, input):
+        print(input.device, self.weight1.device, self.weight2.device)
         return F.linear(
             F.linear(input, self.weight1, None),
             self.weight2,
@@ -78,7 +68,8 @@ class DecomposeLinearSVD(torch.nn.Linear):
             linear_module.weight,
             linear_module.bias,
         )
-        # 여기서 기존 weight/bias는 nn.Linear로부터 넘어왔으므로 필요시 제거
+        # new_linear.weight = None
+        # new_linear.bias = None
         new_linear.U = None
         new_linear.S = None
         new_linear.Vh = None
@@ -225,42 +216,6 @@ class DecomposeLinearEigen(torch.nn.Linear):
         new_linear.weight2.requires_grad = True
         return new_linear
 
-class DecomposeLinearEigenEmpty(torch.nn.Linear):
-    """
-    분해 과정 없이 '빈' 상태로 DecomposeLinearEigen 구조만 만들어 놓은 버전.
-    rank만 맞춰놓고, weight1, weight2 등은 0 또는 임의 값으로 초기화됨.
-    이후 load_state_dict()로 CPU에서 분해된 실제 파라미터를 덮어씌울 수 있다.
-    """
-    def __init__(self, in_features, out_features, rank, device, dtype):
-        super().__init__(in_features, out_features, bias=True)
-        self.mf16 = False
-        self.init = True  # 실제 분해 계산 안 하므로 True로
-        self.rank = rank
-
-        # 필요 파라미터
-        self.weight1 = nn.Parameter(
-            torch.zeros(
-                rank, in_features, requires_grad=True, device=device, dtype=dtype
-            )
-        )
-        self.weight2 = nn.Parameter(
-            torch.zeros(
-                out_features, rank, requires_grad=True, device=device, dtype=dtype
-            )
-        )
-
-        # bias와 유사한 역할
-        self.b1 = None
-        self.Y_sub = None
-        self.V = None
-
-        # 그냥 super()에서 만들어진 self.bias는 살아있음
-        nn.init.zeros_(self.bias)
-
-    def forward(self, input):
-        # 여기서는 별도의 init_lowrank 없음
-        out = F.linear(F.linear(input, self.weight1, None), self.weight2, self.bias)
-        return out
 
 class DecomposeLinearSVDPrune(DecomposeLinearSVD):
     def __init__(self, in_features, out_features, rank, budget, weight, bias):
@@ -271,9 +226,9 @@ class DecomposeLinearSVDPrune(DecomposeLinearSVD):
             weight=weight,
             bias=bias,
         )
-        self.zeta = nn.Parameter(torch.ones(1, rank, requires_grad=True, device=weight.device))
+        self.zeta = nn.Parameter(torch.ones(1, rank, requires_grad=True, device="cuda"))
         self.mask = nn.Parameter(
-            torch.ones(1, rank, requires_grad=False, device=weight.device)
+            torch.ones(1, rank, requires_grad=False, device="cuda")
         )
         self.pruned = False
         self.target_budget = budget
@@ -312,8 +267,8 @@ class DecomposeLinearSVDPrune(DecomposeLinearSVD):
 
     def hard_prune(self, calculate=True):
         if calculate:
-            sorted_val, _ = torch.sort(self.zeta.abs(), 1, descending=True)
-            threshold = sorted_val[0][self.active_ranks]
+            sorted, _ = torch.sort(self.zeta.abs(), 1, descending=True)
+            threshold = sorted[0][self.active_ranks]
             self.mask.data = (
                 (self.zeta.abs() >= threshold).to(self.zeta.device).to(self.zeta.dtype)
             )
@@ -347,6 +302,7 @@ class DecomposeLinearSVDPrune(DecomposeLinearSVD):
             linear_module.weight,
             linear_module.bias,
         )
+        # new_linear.weight = None
         new_linear.U = None
         new_linear.S = None
         new_linear.Vh = None
@@ -365,15 +321,17 @@ class DecomposeLinearEigenPrune(DecomposeLinearEigen):
             weight=weight,
             bias=bias,
         )
-        self.zeta = nn.Parameter(torch.ones(1, rank, requires_grad=True, device=weight.device))
+        self.zeta = nn.Parameter(torch.ones(1, rank, requires_grad=True, device="cuda"))
         self.mask = nn.Parameter(
-            torch.ones(1, rank, requires_grad=False, device=weight.device)
+            torch.ones(1, rank, requires_grad=False, device="cuda")
         )
         self.pruned = False
         self.target_budget = budget
 
     def init_lowrank(self, input):
-        Y = F.linear(input, self.weight, None).reshape(-1, self.weight.shape[0])  # BS, out
+        Y = F.linear(input, self.weight, None).reshape(
+            -1, self.weight.shape[0]
+        )  # BS, out
         cov = torch.cov(torch.transpose(Y, 1, 0))  # out, out
         E, V = torch.linalg.eig(cov)  # out, out
         if "auto" in self.target_budget:
@@ -390,7 +348,7 @@ class DecomposeLinearEigenPrune(DecomposeLinearEigen):
                 self.in_features
                 * self.out_features
                 / (self.in_features + self.out_features)
-                * float(self.target_budget)
+                * self.target_budget
             )
         V = V[:, : self.rank].float()  # out, rank
         self.weight2.data = V.cuda()
@@ -414,8 +372,8 @@ class DecomposeLinearEigenPrune(DecomposeLinearEigen):
 
     def hard_prune(self, calculate=True):
         if calculate:
-            sorted_val, _ = torch.sort(self.zeta.abs(), 1, descending=True)
-            threshold = sorted_val[0][self.active_ranks]
+            sorted, _ = torch.sort(self.zeta.abs(), 1, descending=True)
+            threshold = sorted[0][self.active_ranks]
             self.mask.data = (
                 (self.zeta.abs() >= threshold).to(self.zeta.device).to(self.zeta.dtype)
             )
@@ -449,6 +407,7 @@ class DecomposeLinearEigenPrune(DecomposeLinearEigen):
             linear_module.weight,
             linear_module.bias,
         )
+        # new_linear.weight = None
         new_linear.weight1.requires_grad = True
         new_linear.weight2.requires_grad = True
         new_linear.zeta.requires_grad = True
@@ -462,7 +421,7 @@ class ChannelPrune(torch.nn.Linear):
         )
         self.weight = weight
         self.zeta = nn.Parameter(
-            torch.ones(1, out_features, requires_grad=True, device=weight.device)
+            torch.ones(1, out_features, requires_grad=True, device="cuda")
         )
         self.pruned = False
         self.threshold = 0
@@ -470,15 +429,18 @@ class ChannelPrune(torch.nn.Linear):
         self.budget = 1.0
 
     def forward(self, input):
-        # 간단하게 channel-wise 곱
+        # z = self.get_zeta()
+        # self.set_threshold()
+        # self.set_budget()
+        # self.mask = self.zeta - self.zeta.detach() + (self.zeta>self.threshold).to(self.zeta.device).to(self.zeta.dtype)
         return F.linear(input, self.weight, None) * self.get_mask()
 
     def set_threshold(self):
         active_channels = int(
             math.sqrt(self.target_budget) * self.out_features
-        )
-        sorted_val, _ = torch.sort(self.zeta.abs(), 1, descending=True)
-        self.threshold = sorted_val[0][active_channels]
+        )  ## assuming for input channels are pruned in previous layer at same rate
+        sorted, _ = torch.sort(self.zeta.abs(), 1, descending=True)
+        self.threshold = sorted[0][active_channels]
 
     def set_budget(self):
         self.budget = ((self.zeta >= self.threshold).sum() / self.out_features).item()
@@ -508,10 +470,6 @@ class ChannelPrune(torch.nn.Linear):
         return new_linear
 
 
-########################################
-# 모듈 인젝션
-########################################
-
 class ModuleInjection:
     @staticmethod
     def make_decomposable(linear_module, budget, method="eigen"):
@@ -523,7 +481,6 @@ class ModuleInjection:
         in_channels = linear_module.in_features
         out_channels = linear_module.out_features
         kappa = in_channels * out_channels / (in_channels + out_channels)
-
         if method == "prune-eigen":
             new_linear = DecomposeLinearEigenPrune.from_linear(
                 linear_module, linear_module.out_features, budget
@@ -552,26 +509,7 @@ class ModuleInjection:
             new_linear = linear_module
         linear_module = None
         return new_linear
-    
-    @staticmethod
-    def make_decomposable_empty(linear_module, rank, method="eigen"):
-        """
-        분해 계산 없이, 동일 구조의 모듈만 새로 만들어 반환
-        """
-        device = linear_module.weight.device
-        dtype = linear_module.weight.dtype
-        if method == "eigen":
-            new_linear = DecomposeLinearEigenEmpty(
-                linear_module.in_features, linear_module.out_features, rank, device, dtype
-            )
-        else:
-            raise NotImplementedError("현재 예시는 eigen만 예시로 작성")
-        return new_linear
 
-
-########################################
-# 피처 추출용 (Hook)
-########################################
 
 class FeatureExtractor(nn.Module):
     def __init__(self, model: nn.Module, index=None, layers=None, return_outputs=False):

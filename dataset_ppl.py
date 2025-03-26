@@ -65,7 +65,7 @@ def get_loaders_chunk(name, chunk, size, tokenizer, seq_len=2048, batch_size=8):
         # GSM8K에서는 'question' 필드를 사용
         test_dataset = process_data(test_data[start:end], tokenizer, seq_len, 'question')
     elif 'xsum' in name:
-        test_data = load_dataset('xsum', split='test')
+        test_data = load_dataset('xsum', split='validation')
         num_samples = len(test_data)
         assert(size < 1.0)
         num_eval = int(size * num_samples)
